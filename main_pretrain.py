@@ -14,22 +14,22 @@ import json
 import os
 import time
 
-import mae_st.util.env
+import util.env
 
-import mae_st.util.misc as misc
+import util.misc as misc
 
 import numpy as np
 import timm
 import torch
 import torch.backends.cudnn as cudnn
 from iopath.common.file_io import g_pathmgr as pathmgr
-from mae_st import models_mae
-from mae_st.engine_pretrain import train_one_epoch
-from mae_st.util.kinetics import Kinetics
-from mae_st.util.misc import NativeScalerWithGradNormCount as NativeScaler
+import models_mae
+from engine_pretrain import train_one_epoch
+from util.kinetics import Kinetics
+from util.misc import NativeScalerWithGradNormCount as NativeScaler
 from tensorboard.compat.tensorflow_stub.io.gfile import register_filesystem
 from torch.utils.tensorboard import SummaryWriter
-
+from csvdata import CSVMAE
 
 def get_args_parser():
     parser = argparse.ArgumentParser("MAE pre-training", add_help=False)
@@ -219,15 +219,10 @@ def main(args):
 
     cudnn.benchmark = True
 
-    dataset_train = Kinetics(
-        mode="pretrain",
+    dataset_train = CSVMAE(
         path_to_data_dir=args.path_to_data_dir,
         sampling_rate=args.sampling_rate,
         num_frames=args.num_frames,
-        train_jitter_scales=(256, 320),
-        repeat_aug=args.repeat_aug,
-        jitter_aspect_relative=args.jitter_aspect_relative,
-        jitter_scales_relative=args.jitter_scales_relative,
     )
     if args.distributed:
         num_tasks = misc.get_world_size()

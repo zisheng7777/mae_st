@@ -219,38 +219,53 @@ class MaskedAutoencoderViT(nn.Module):
         """
         N, T, H, W, p, u, t, h, w = self.patch_info
 
-        x = x.reshape(shape=(N, t, h, w, u, p, p, 3))
-
+        # x = x.reshape(shape=(N, t, h, w, u, p, p, 3))
+        # for gray scale
+        x = x.reshape(shape=(N, t, h, w, u, p, p))
         x = torch.einsum("nthwupqc->nctuhpwq", x)
-        imgs = x.reshape(shape=(N, 3, T, H, W))
+        imgs = x.reshape(shape=(N, 1, T, H, W))
         return imgs
 
-    def random_masking(self, x, mask_ratio):
+    ## for custom masking
+    def random_masking(self, x, mask_ratio, custom_mask=None):
         """
-        Perform per-sample random masking by per-sample shuffling.
-        Per-sample shuffling is done by argsort random noise.
+        Perform random masking with an option to use a custom mask.
         x: [N, L, D], sequence
+        custom_mask: Optional[Tensor], a predefined mask where 1 indicates removal and 0 indicates keep.
         """
-        N, L, D = x.shape  # batch, length, dim
-        len_keep = int(L * (1 - mask_ratio))
+        N, L, D = x.shape  # batch, length, dim 
 
+        # Generate initial random noise
         noise = torch.rand(N, L, device=x.device)  # noise in [0, 1]
 
-        # sort noise for each sample
-        ids_shuffle = torch.argsort(
-            noise, dim=1
-        )  # ascend: small is keep, large is remove
-        ids_restore = torch.argsort(ids_shuffle, dim=1)
+        if custom_mask is not None:
+            # Ensure custom_mask is on the same device and has the correct dimensions
+            custom_mask = custom_mask.to(x.device).view(N, L)
+            # Set noise values extremely high at indices where custom_mask is 1
+            noise[custom_mask == 1] = 2.0  # Set to a high value to ensure they are masked
 
-        # keep the first subset
-        ids_keep = ids_shuffle[:, :len_keep]
-        x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D))
+            # Sort noise in descending order so that higher values (set by custom_mask) are placed last and removed
+            ids_shuffle = torch.argsort(noise, dim=1, descending=False)
+            ids_restore = torch.argsort(ids_shuffle, dim=1)
+            len_keep = (custom_mask == 0).sum(dim=1)
+            ids_keep = ids_shuffle[:, :len_keep]
+            # Select indices to keep based on noise sorting
+            x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).expand(-1, -1, D))
 
-        # generate the binary mask: 0 is keep, 1 is remove
-        mask = torch.ones([N, L], device=x.device)
-        mask[:, :len_keep] = 0
-        # unshuffle to get the binary mask
-        mask = torch.gather(mask, dim=1, index=ids_restore)
+            # Generate the binary mask: 0 is keep, 1 is remove
+            # mask = torch.zeros_like(noise, device=x.device)
+            # mask[noise >= 2.0] = 1  # Directly use noise to determine masking
+            mask = torch.ones([N, L], device=x.device)
+            mask.scatter_(1, ids_keep, 0)
+
+        else:
+            len_keep = int(L * (1 - mask_ratio))  # Keep this fraction of elements
+            ids_shuffle = torch.argsort(noise, dim=1, descending=False)
+            ids_restore = torch.argsort(ids_shuffle, dim=1)
+            ids_keep = ids_shuffle[:, :len_keep]
+            x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).expand(-1, -1, D))
+            mask = torch.ones([N, L], device=x.device)
+            mask.scatter_(1, ids_keep, 0)
 
         return x_masked, mask, ids_restore, ids_keep
 
@@ -471,4 +486,11 @@ def mae_vit_huge_patch14(**kwargs):
         norm_layer=partial(nn.LayerNorm, eps=1e-6),
         **kwargs,
     )
+    return model
+
+def mae_vit_base_patch1_dec512d8b(**kwargs):
+    model = MaskedAutoencoderViT(
+        patch_size=1, embed_dim=768, depth=12, num_heads=12,
+        decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16,
+        mlp_ratio=4, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
     return model
