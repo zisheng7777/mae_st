@@ -14,8 +14,8 @@ from functools import partial
 
 import torch
 import torch.nn as nn
-from mae_st.util import video_vit
-from mae_st.util.logging import master_print as print
+from util import video_vit
+from util.logging import master_print as print
 
 
 class MaskedAutoencoderViT(nn.Module):
@@ -23,9 +23,9 @@ class MaskedAutoencoderViT(nn.Module):
 
     def __init__(
         self,
-        img_size=224,
-        patch_size=16,
-        in_chans=3,
+        img_size=4,
+        patch_size=1,
+        in_chans=1,
         embed_dim=1024,
         depth=24,
         num_heads=16,
@@ -206,9 +206,9 @@ class MaskedAutoencoderViT(nn.Module):
         h = w = H // p
         t = T // u
 
-        x = imgs.reshape(shape=(N, 3, t, u, h, p, w, p))
+        x = imgs.reshape(shape=(N, 1, t, u, h, p, w, p))
         x = torch.einsum("nctuhpwq->nthwupqc", x)
-        x = x.reshape(shape=(N, t * h * w, u * p**2 * 3))
+        x = x.reshape(shape=(N, t * h * w, u * p**2 * 1))
         self.patch_info = (N, T, H, W, p, u, t, h, w)
         return x
 
@@ -221,7 +221,7 @@ class MaskedAutoencoderViT(nn.Module):
 
         # x = x.reshape(shape=(N, t, h, w, u, p, p, 3))
         # for gray scale
-        x = x.reshape(shape=(N, t, h, w, u, p, p))
+        x = x.reshape(shape=(N, t, h, w, u, p, p, 1))
         x = torch.einsum("nthwupqc->nctuhpwq", x)
         imgs = x.reshape(shape=(N, 1, T, H, W))
         return imgs
@@ -269,15 +269,12 @@ class MaskedAutoencoderViT(nn.Module):
 
         return x_masked, mask, ids_restore, ids_keep
 
-    def forward_encoder(self, x, mask_ratio):
-        # embed patches
+    def forward_encoder(self, x, mask_ratio, custom_mask=None):
         x = self.patch_embed(x)
         N, T, L, C = x.shape
-
         x = x.reshape(N, T * L, C)
 
-        # masking: length -> length * mask_ratio
-        x, mask, ids_restore, ids_keep = self.random_masking(x, mask_ratio)
+        x, mask, ids_restore, ids_keep = self.random_masking(x, mask_ratio, custom_mask)
         x = x.view(N, -1, C)
         # append cls token
         if self.cls_embed:
@@ -443,9 +440,9 @@ class MaskedAutoencoderViT(nn.Module):
         loss = (loss * mask).sum() / mask.sum()  # mean loss on removed patches
         return loss
 
-    def forward(self, imgs, mask_ratio=0.75):
-        latent, mask, ids_restore = self.forward_encoder(imgs, mask_ratio)
-        pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
+    def forward(self, imgs, mask_ratio=0.75, custom_mask=None):
+        latent, mask, ids_restore = self.forward_encoder(imgs, mask_ratio, custom_mask)
+        pred = self.forward_decoder(latent, ids_restore)
         loss = self.forward_loss(imgs, pred, mask)
         return loss, pred, mask
 
@@ -488,9 +485,14 @@ def mae_vit_huge_patch14(**kwargs):
     )
     return model
 
-def mae_vit_base_patch1_dec512d8b(**kwargs):
+def mae_vit_base_patch1(**kwargs):
     model = MaskedAutoencoderViT(
-        patch_size=1, embed_dim=768, depth=12, num_heads=12,
-        decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16,
-        mlp_ratio=4, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
+        patch_size=1,
+        embed_dim=768,
+        depth=12,
+        num_heads=12,
+        mlp_ratio=4,
+        norm_layer=partial(nn.LayerNorm, eps=1e-6),
+        **kwargs,
+    )
     return model
