@@ -2,7 +2,7 @@
 # All rights reserved.
 
 
-import mae_st.util.logging as logging
+import util.logging as logging
 import torch
 import torch.nn as nn
 from timm.models.layers import to_2tuple
@@ -17,7 +17,7 @@ class PatchEmbed(nn.Module):
 
     def __init__(
         self,
-        img_size=224,
+        img_size=4,
         patch_size=16,
         in_chans=3,
         embed_dim=768,
