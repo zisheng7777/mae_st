@@ -25,11 +25,11 @@ import torch.backends.cudnn as cudnn
 from iopath.common.file_io import g_pathmgr as pathmgr
 import models_mae
 from engine_pretrain import train_one_epoch
-from util.kinetics import Kinetics
+# from util.kinetics import Kinetics
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
 from tensorboard.compat.tensorflow_stub.io.gfile import register_filesystem
 from torch.utils.tensorboard import SummaryWriter
-from csvdata import CSVMAE
+from util.csvdata import CSVMAE
 
 def get_args_parser():
     parser = argparse.ArgumentParser("MAE pre-training", add_help=False)
@@ -153,7 +153,7 @@ def get_args_parser():
     parser.add_argument("--decoder_num_heads", default=16, type=int)
     parser.add_argument("--t_patch_size", default=2, type=int)
     parser.add_argument("--num_frames", default=16, type=int)
-    parser.add_argument("--checkpoint_period", default=1, type=int)
+    parser.add_argument("--checkpoint_period", default=20, type=int)
     parser.add_argument("--sampling_rate", default=4, type=int)
     parser.add_argument("--distributed", action="store_true")
     parser.add_argument("--repeat_aug", default=4, type=int)
@@ -166,7 +166,7 @@ def get_args_parser():
     parser.add_argument("--bias_wd", action="store_true")
     parser.add_argument("--num_checkpoint_del", default=20, type=int)
     parser.add_argument("--sep_pos_embed", action="store_true")
-    parser.set_defaults(sep_pos_embed=True)
+    parser.set_defaults(sep_pos_embed=False)
     parser.add_argument(
         "--trunc_init",
         action="store_true",
@@ -200,11 +200,12 @@ def get_args_parser():
         default=8,
     )
     parser.add_argument("--cls_embed", action="store_true")
-    parser.set_defaults(cls_embed=True)
+    parser.set_defaults(cls_embed=False)
     return parser
 
 
 def main(args):
+
     misc.init_distributed_mode(args)
 
     print("job dir: {}".format(os.path.dirname(os.path.realpath(__file__))))
@@ -220,9 +221,10 @@ def main(args):
     cudnn.benchmark = True
 
     dataset_train = CSVMAE(
-        path_to_data_dir=args.path_to_data_dir,
+        root_dir=args.path_to_data_dir,
         sampling_rate=args.sampling_rate,
         num_frames=args.num_frames,
+
     )
     if args.distributed:
         num_tasks = misc.get_world_size()

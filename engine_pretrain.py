@@ -11,8 +11,8 @@
 import math
 from typing import Iterable
 
-import mae_st.util.lr_sched as lr_sched
-import mae_st.util.misc as misc
+import util.lr_sched as lr_sched
+import util.misc as misc
 import torch
 from iopath.common.file_io import g_pathmgr as pathmgr
 
@@ -50,6 +50,11 @@ def train_one_epoch(
 
     optimizer.zero_grad()
 
+    mask_ratio_list = torch.arange(0.25, args.mask_ratio + 0.001, 0.05).tolist()
+    epoch_mask_ratio = mask_ratio_list[torch.randint(len(mask_ratio_list), (1,)).item()]
+    print(f"[Epoch {epoch}] Using mask_ratio = {epoch_mask_ratio:.2f}")
+
+
     if log_writer is not None:
         print("log_dir: {}".format(log_writer.log_dir))
 
@@ -70,7 +75,7 @@ def train_one_epoch(
         with torch.cuda.amp.autocast(enabled=not fp32):
             loss, _, _ = model(
                 samples,
-                mask_ratio=args.mask_ratio,
+                mask_ratio=epoch_mask_ratio,
             )
 
         loss_value = loss.item()
@@ -114,10 +119,11 @@ def train_one_epoch(
             This calibrates different curves when batch size changes.
             """
             epoch_1000x = int(
-                (data_iter_step / len(data_loader) + epoch) * 1000 * args.repeat_aug
+                (data_iter_step / len(data_loader) + epoch) * 1000
             )
             log_writer.add_scalar("train_loss", loss_value_reduce, epoch_1000x)
             log_writer.add_scalar("lr", lr, epoch_1000x)
+
 
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()

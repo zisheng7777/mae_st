@@ -16,7 +16,8 @@ import torch
 import torch.nn as nn
 from util import video_vit
 from util.logging import master_print as print
-
+from util import pos_embed_sincos
+import numpy as np
 
 class MaskedAutoencoderViT(nn.Module):
     """Masked Autoencoder with VisionTransformer backbone"""
@@ -36,10 +37,10 @@ class MaskedAutoencoderViT(nn.Module):
         norm_layer=nn.LayerNorm,
         norm_pix_loss=False,
         num_frames=16,
-        t_patch_size=4,
+        t_patch_size=1,
         patch_embed=video_vit.PatchEmbed,
         no_qkv_bias=False,
-        sep_pos_embed=False,
+        sep_pos_embed=True,
         trunc_init=False,
         cls_embed=False,
         pred_t_dim=8,
@@ -69,12 +70,20 @@ class MaskedAutoencoderViT(nn.Module):
             self.decoder_cls_token = nn.Parameter(torch.zeros(1, 1, decoder_embed_dim))
 
         if sep_pos_embed:
+            # self.pos_embed_spatial = nn.Parameter(
+            #     torch.zeros(1, input_size[1] * input_size[2], embed_dim)
+            # )
+            # self.pos_embed_temporal = nn.Parameter(
+            #     torch.zeros(1, input_size[0], embed_dim)
+            # )
+            # sin-cos
             self.pos_embed_spatial = nn.Parameter(
-                torch.zeros(1, input_size[1] * input_size[2], embed_dim)
-            )
+                torch.from_numpy(pos_embed_sincos.get_2d_sincos_pos_embed(embed_dim, input_size[1], cls_token=False)).unsqueeze(0).float()
+            )  # （2D）
             self.pos_embed_temporal = nn.Parameter(
-                torch.zeros(1, input_size[0], embed_dim)
-            )
+                torch.from_numpy(pos_embed_sincos.get_1d_sincos_pos_embed_from_grid(embed_dim, np.arange(input_size[0]))).unsqueeze(0).float()
+            )  # （1D）
+
             if self.cls_embed:
                 self.pos_embed_class = nn.Parameter(torch.zeros(1, 1, embed_dim))
         else:
@@ -84,7 +93,7 @@ class MaskedAutoencoderViT(nn.Module):
                 _num_patches = num_patches
 
             self.pos_embed = nn.Parameter(
-                torch.zeros(1, _num_patches, embed_dim),
+                torch.zeros(1, _num_patches, embed_dim), requires_grad=False
             )
 
         self.blocks = nn.ModuleList(
@@ -107,12 +116,19 @@ class MaskedAutoencoderViT(nn.Module):
         self.mask_token = nn.Parameter(torch.zeros(1, 1, decoder_embed_dim))
 
         if sep_pos_embed:
+            # self.decoder_pos_embed_spatial = nn.Parameter(
+            #     torch.zeros(1, input_size[1] * input_size[2], decoder_embed_dim)
+            # )
+            # self.decoder_pos_embed_temporal = nn.Parameter(
+            #     torch.zeros(1, input_size[0], decoder_embed_dim)
+            # )
+            # sin-cos
             self.decoder_pos_embed_spatial = nn.Parameter(
-                torch.zeros(1, input_size[1] * input_size[2], decoder_embed_dim)
-            )
+                torch.from_numpy(pos_embed_sincos.get_2d_sincos_pos_embed(decoder_embed_dim, input_size[1], cls_token=False)).unsqueeze(0).float()
+            )  # （2D）
             self.decoder_pos_embed_temporal = nn.Parameter(
-                torch.zeros(1, input_size[0], decoder_embed_dim)
-            )
+                torch.from_numpy(pos_embed_sincos.get_1d_sincos_pos_embed_from_grid(decoder_embed_dim, np.arange(input_size[0]))).unsqueeze(0).float()
+            )  # （1D）
             if self.cls_embed:
                 self.decoder_pos_embed_class = nn.Parameter(
                     torch.zeros(1, 1, decoder_embed_dim)
@@ -124,7 +140,7 @@ class MaskedAutoencoderViT(nn.Module):
                 _num_patches = num_patches
 
             self.decoder_pos_embed = nn.Parameter(
-                torch.zeros(1, _num_patches, decoder_embed_dim),
+                torch.zeros(1, _num_patches, decoder_embed_dim), requires_grad=False
             )
 
         self.decoder_blocks = nn.ModuleList(
@@ -219,7 +235,6 @@ class MaskedAutoencoderViT(nn.Module):
         """
         N, T, H, W, p, u, t, h, w = self.patch_info
 
-        # x = x.reshape(shape=(N, t, h, w, u, p, p, 3))
         # for gray scale
         x = x.reshape(shape=(N, t, h, w, u, p, p, 1))
         x = torch.einsum("nthwupqc->nctuhpwq", x)
@@ -234,7 +249,6 @@ class MaskedAutoencoderViT(nn.Module):
         custom_mask: Optional[Tensor], a predefined mask where 1 indicates removal and 0 indicates keep.
         """
         N, L, D = x.shape  # batch, length, dim 
-
         # Generate initial random noise
         noise = torch.rand(N, L, device=x.device)  # noise in [0, 1]
 
@@ -268,13 +282,80 @@ class MaskedAutoencoderViT(nn.Module):
             mask.scatter_(1, ids_keep, 0)
 
         return x_masked, mask, ids_restore, ids_keep
+    
+    def tube_masking(self, x, mask_ratio, custom_mask=None):
+        N, L, D = x.shape
+        T = self.patch_embed.t_grid_size
+        H = self.patch_embed.grid_size
+        W = H  # 假設是方形 patch
+        assert L == T * H * W, f"L={L}, T*H*W={T*H*W}"
+        
+        if custom_mask is not None:
+            if custom_mask.ndim == 1:
+                sensors_per_frame = self.patch_embed.grid_size ** 2
+                expected_frame_mask_len = sensors_per_frame
+                total_patches = T * sensors_per_frame
+                if custom_mask.numel() != expected_frame_mask_len:
+                    raise ValueError(f"custom_mask 應該長度是 {expected_frame_mask_len}，但你給了 {custom_mask.numel()}")
+
+                # 重複 T 次
+                custom_mask = custom_mask.repeat(T)  # shape: [L]
+                custom_mask = custom_mask.unsqueeze(0).expand(N, -1)  # shape: [N, L]
+
+            elif custom_mask.shape != (N, L):
+                raise ValueError(f"custom_mask shape 應該是 ({N}, {L})，但你給了 {custom_mask.shape}")
+
+            # ➕ 以下與 random_masking 相同：從 custom_mask 推出 ids_keep 等
+            ids_keep = torch.nonzero(custom_mask == 0, as_tuple=False)[:, 1].view(N, -1)
+            x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).expand(-1, -1, D))
+            ids_shuffle = torch.argsort(torch.rand(N, L, device=x.device), dim=1)
+            ids_restore = torch.argsort(ids_shuffle, dim=1)
+            mask = torch.ones([N, L], device=x.device)
+            mask.scatter_(1, ids_keep, 0)
+
+
+        else:
+
+            noise = torch.rand(N, H * W, device=x.device)
+            len_keep = int(H * W * (1 - mask_ratio))
+            # print(f"[tube_masking] len_keep per frame = {len_keep}")
+
+            ids_spatial = torch.argsort(noise, dim=1)
+            ids_keep_spatial = ids_spatial[:, :len_keep]  # [N, len_keep]
+
+            # 在 temporal 軸上保留這些位置形成的 tube
+            ids_keep = []
+            for b in range(N):
+                keep = []
+                for t in range(T):
+                    for id_ in ids_keep_spatial[b]:
+                        keep.append(t * H * W + id_)
+                ids_keep.append(torch.tensor(keep, device=x.device))
+            ids_keep = torch.stack(ids_keep)
+
+            # print(f"[tube_masking] ids_keep.shape = {ids_keep.shape}")  # 應該是 [N, len_keep * T]
+
+            # 為還原 token 排序
+            ids_shuffle = torch.argsort(torch.rand(N, L, device=x.device), dim=1)
+            ids_restore = torch.argsort(ids_shuffle, dim=1)
+
+            x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).expand(-1, -1, D))
+
+            mask = torch.ones([N, L], device=x.device)
+            mask.scatter_(1, ids_keep, 0)
+
+            # print(f"[tube_masking] mask[0]: {mask[0].tolist()}")  # 第一個 batch 的 mask 結果
+            # print(f"[tube_masking] x_masked.shape = {x_masked.shape}")
+
+        return x_masked, mask, ids_restore, ids_keep
+
 
     def forward_encoder(self, x, mask_ratio, custom_mask=None):
         x = self.patch_embed(x)
         N, T, L, C = x.shape
         x = x.reshape(N, T * L, C)
+        x, mask, ids_restore, ids_keep = self.tube_masking(x, mask_ratio, custom_mask)
 
-        x, mask, ids_restore, ids_keep = self.random_masking(x, mask_ratio, custom_mask)
         x = x.view(N, -1, C)
         # append cls token
         if self.cls_embed:
@@ -386,6 +467,7 @@ class MaskedAutoencoderViT(nn.Module):
         # add pos embed
         x = x + decoder_pos_embed
 
+
         attn = self.decoder_blocks[0].attn
         requires_t_shape = hasattr(attn, "requires_t_shape") and attn.requires_t_shape
         if requires_t_shape:
@@ -428,10 +510,10 @@ class MaskedAutoencoderViT(nn.Module):
             .to(imgs.device),
         )
         target = self.patchify(_imgs)
-        if self.norm_pix_loss:
-            mean = target.mean(dim=-1, keepdim=True)
-            var = target.var(dim=-1, keepdim=True)
-            target = (target - mean) / (var + 1.0e-6) ** 0.5
+        # if self.norm_pix_loss:
+        #     mean = target.mean(dim=-1, keepdim=True)
+        #     var = target.var(dim=-1, keepdim=True)
+        #     target = (target - mean) / (var + 1.0e-6) ** 0.5
 
         loss = (pred - target) ** 2
         loss = loss.mean(dim=-1)  # [N, L], mean loss per patch
@@ -441,9 +523,13 @@ class MaskedAutoencoderViT(nn.Module):
         return loss
 
     def forward(self, imgs, mask_ratio=0.75, custom_mask=None):
-        latent, mask, ids_restore = self.forward_encoder(imgs, mask_ratio, custom_mask)
+        if(custom_mask==None):
+            latent, mask, ids_restore = self.forward_encoder(imgs, mask_ratio)
+        else:
+            latent, mask, ids_restore = self.forward_encoder(imgs, mask_ratio, custom_mask)
         pred = self.forward_decoder(latent, ids_restore)
         loss = self.forward_loss(imgs, pred, mask)
+
         return loss, pred, mask
 
 
